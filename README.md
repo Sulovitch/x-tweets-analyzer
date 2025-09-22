@@ -5,4 +5,4 @@
 ## التشغيل محلياً
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+streamlit run tweats_analysis.py
