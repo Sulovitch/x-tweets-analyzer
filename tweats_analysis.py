@@ -35,9 +35,17 @@ def beautify_axes(ax):
 st.set_page_config(page_title="تحليل تغريدات X", layout="wide")
 
 # ====== إعدادات المستخدم (Sidebar) ======
+
+
 st.sidebar.header("🔑 إعدادات الحساب")
+
+USE_DEMO = st.sidebar.checkbox("🔄 تشغيل وضع التجربة ", value=False)
+
 USERNAME = st.sidebar.text_input("👤 اسم المستخدم (بدون @)")
 BEARER_TOKEN = st.sidebar.text_input("🔑 Twitter Bearer Token", type="password")
+
+
+
 
 with st.sidebar.expander("📘 كيف تحصل على التوكن؟"):
     st.markdown("""
@@ -47,13 +55,143 @@ with st.sidebar.expander("📘 كيف تحصل على التوكن؟"):
     4) ألصقه هنا
     """)
 
-if not USERNAME or not BEARER_TOKEN:
-    st.warning("👆 أدخل اسم الحساب والتوكن للمتابعة.")
-    st.stop()
+if not USE_DEMO:
+    if not USERNAME or not BEARER_TOKEN:
+        st.warning("👆 أدخل اسم الحساب والتوكن للمتابعة، أو فعّل وضع التجربة.")
+        st.stop()
+
+
 
 # ====== ملفات التخزين المحلية ======
 CACHE_FILE = "tweets_cache.json"      # الكاش للتغريدات + تاريخ التحديث
 LAST_FETCH_FILE = "last_fetch.json"   # آخر وقت جلب (لمنع إعادة الجلب قبل 30 يوم)
+
+# ====== بيانات تجريبية (Demo Mode) ======
+# ====== بيانات تجريبية (Demo Mode) ======
+DUMMY_TWEETS = [
+    {
+        "id": "1",
+        "text": "أول تغريدة تجريبية 😊 تجربة التحليل",
+        "created_at": "2025-09-01T12:00:00Z",
+        "public_metrics": {
+            "like_count": 10,
+            "retweet_count": 2,
+            "reply_count": 1,
+            "impression_count": 100
+        },
+        "media_urls": []
+    },
+    {
+        "id": "2",
+        "text": "تغريدة ثانية مع صورة #تجربة",
+        "created_at": "2025-09-02T18:30:00Z",
+        "public_metrics": {
+            "like_count": 25,
+            "retweet_count": 5,
+            "reply_count": 3,
+            "impression_count": 200
+        },
+        "media_urls": ["https://placekitten.com/400/300"]
+    },
+    {
+        "id": "3",
+        "text": "نصيحة: البرمجة مثل الرياضة، لازم تدريب يومي! 💻 #برمجة #تعلم",
+        "created_at": "2025-09-03T09:15:00Z",
+        "public_metrics": {
+            "like_count": 50,
+            "retweet_count": 10,
+            "reply_count": 5,
+            "impression_count": 500
+        },
+        "media_urls": []
+    },
+    {
+        "id": "4",
+        "text": "@example شكراً على الدعم 🙏 تجربة منشن",
+        "created_at": "2025-09-04T14:45:00Z",
+        "public_metrics": {
+            "like_count": 5,
+            "retweet_count": 0,
+            "reply_count": 2,
+            "impression_count": 80
+        },
+        "media_urls": []
+    },
+    {
+        "id": "5",
+        "text": "🔥 أهم نصائح لزيادة التفاعل على X: الصور + الوقت المناسب!",
+        "created_at": "2025-09-05T21:00:00Z",
+        "public_metrics": {
+            "like_count": 100,
+            "retweet_count": 20,
+            "reply_count": 15,
+            "impression_count": 1500
+        },
+        "media_urls": ["https://placebear.com/500/300"]
+    },
+    {
+        "id": "6",
+        "text": "اليوم كان جميل 🌅 #إيجابية #سعادة",
+        "created_at": "2025-09-06T06:30:00Z",
+        "public_metrics": {
+            "like_count": 80,
+            "retweet_count": 8,
+            "reply_count": 1,
+            "impression_count": 600
+        },
+        "media_urls": []
+    },
+    {
+        "id": "7",
+        "text": "للأسف اليوم كان مزعج جدًا 😞 #حزن",
+        "created_at": "2025-09-06T23:59:00Z",
+        "public_metrics": {
+            "like_count": 3,
+            "retweet_count": 0,
+            "reply_count": 1,
+            "impression_count": 120
+        },
+        "media_urls": []
+    },
+    {
+        "id": "8",
+        "text": "تغريدة تجريبية طويلة شوية حتى نشوف كيف تنعرض في البطاقة... هذا اختبار بسيط 👍",
+        "created_at": "2025-09-07T11:10:00Z",
+        "public_metrics": {
+            "like_count": 15,
+            "retweet_count": 4,
+            "reply_count": 2,
+            "impression_count": 300
+        },
+        "media_urls": []
+    },
+    {
+        "id": "9",
+        "text": "جربت اليوم مكتبة جديدة بلغة بايثون وكانت رهيبة! #Python #Coding",
+        "created_at": "2025-09-08T17:20:00Z",
+        "public_metrics": {
+            "like_count": 45,
+            "retweet_count": 7,
+            "reply_count": 4,
+            "impression_count": 450
+        },
+        "media_urls": []
+    },
+    {
+        "id": "10",
+        "text": "معلومة سريعة: يمكن تدريب نموذج بسيط للتنبؤ بالتفاعل باستخدام Linear Regression 🧠",
+        "created_at": "2025-09-09T13:00:00Z",
+        "public_metrics": {
+            "like_count": 60,
+            "retweet_count": 12,
+            "reply_count": 6,
+            "impression_count": 900
+        },
+        "media_urls": []
+    }
+]
+
+
 
 # ====== تهيئة اتصال API ======
 def auth_header():
@@ -138,33 +276,42 @@ def load_cached_tweets():
     return [], None
 
 # ====== جلب التغريدات (مرة كل 30 يوم) ======
-tweets, last_updated = load_cached_tweets()
-last_fetch_date = None
-if os.path.exists(LAST_FETCH_FILE):
-    with open(LAST_FETCH_FILE, "r", encoding="utf-8") as f:
-        last_fetch_date = json.load(f).get("last_fetch")
+if USE_DEMO:
+    # ✅ في وضع التجربة نستخدم التغريدات الوهمية
+    tweets = DUMMY_TWEETS
+    last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    last_fetch_date = None
+    st.info("🧪 وضع التجربة مفعل — البيانات المستخدمة ليست حقيقية.")
+else:
+    # 🔄 الوضع العادي: نحمل من الكاش ونتعامل مع API
+    tweets, last_updated = load_cached_tweets()
+    last_fetch_date = None
+    if os.path.exists(LAST_FETCH_FILE):
+        with open(LAST_FETCH_FILE, "r", encoding="utf-8") as f:
+            last_fetch_date = json.load(f).get("last_fetch")
 
-disable_fetch = False
-if last_fetch_date:
-    last_dt = datetime.fromisoformat(last_fetch_date)
-    days_since = (datetime.now() - last_dt).days
-    if days_since < 30:
-        st.info(f"⏳ تم الجلب بتاريخ {last_dt.strftime('%Y-%m-%d')} — يمكنك الجلب مرة أخرى بعد {30 - days_since} يوم")
-        disable_fetch = True
-    else:
-        st.success("✅ انتهت مدة الانتظار، يمكنك الجلب الآن")
+    disable_fetch = False
+    if last_fetch_date:
+        last_dt = datetime.fromisoformat(last_fetch_date)
+        days_since = (datetime.now() - last_dt).days
+        if days_since < 30:
+            st.info(f"⏳ تم الجلب بتاريخ {last_dt.strftime('%Y-%m-%d')} — يمكنك الجلب مرة أخرى بعد {30 - days_since} يوم")
+            disable_fetch = True
+        else:
+            st.success("✅ انتهت مدة الانتظار، يمكنك الجلب الآن")
 
-if st.button("🚀 جلب التغريدات (حتى 100 مرّة واحدة)", disabled=disable_fetch):
-    try:
-        user_id = get_user_id(USERNAME)
-        tweets = get_latest_tweets(user_id, max_results=100)
-        save_cached_tweets(tweets)
-        with open(LAST_FETCH_FILE, "w", encoding="utf-8") as f:
-            json.dump({"last_fetch": datetime.now().isoformat()}, f)
-        st.success(f"✅ تم جلب {len(tweets)} تغريدة بنجاح")
-    except Exception as e:
-        st.error(f"⚠️ خطأ أثناء الجلب: {e}")
-        st.stop()
+    if st.button("🚀 جلب التغريدات (حتى 100 مرّة واحدة)", disabled=disable_fetch):
+        try:
+            user_id = get_user_id(USERNAME)
+            tweets = get_latest_tweets(user_id, max_results=100)
+            save_cached_tweets(tweets)
+            with open(LAST_FETCH_FILE, "w", encoding="utf-8") as f:
+                json.dump({"last_fetch": datetime.now().isoformat()}, f)
+            st.success(f"✅ تم جلب {len(tweets)} تغريدة بنجاح")
+        except Exception as e:
+            st.error(f"⚠️ خطأ أثناء الجلب: {e}")
+            st.stop()
+
 
 if not tweets:
     st.warning("⚠️ لا توجد بيانات بعد. قم بالجلب أولاً.")
@@ -290,6 +437,7 @@ with tab1:
     st.subheader("📝 قائمة التغريدات")
     st.caption("كل بطاقة تعرض أهم أرقام التغريدة مع رابط مباشر وصور إن وجدت.")
 
+    # --- عرض بطاقات التغريدات ---
     if show_cards:
         for _, row in filtered.iterrows():
             tweet_url = f"https://twitter.com/{USERNAME}/status/{row['id']}"
@@ -311,138 +459,140 @@ with tab1:
     else:
         st.info("🗂️ تم إخفاء بطاقات التغريدات. فعّل الخيار أعلاه لعرضها.")
 
-        # ✅ الرسوم تظل دائمًا ظاهرة بغض النظر عن show_cards
-        st.subheader("🔥 أكثر التغريدات تفاعلًا")
-        st.caption("أفضل 10 تغريدات حسب إجمالي التفاعل.")
-        top10 = filtered.sort_values(by="إجمالي التفاعل", ascending=False).head(10)
-        if len(top10) > 0:
-            fig, ax = plt.subplots()
-            ax.barh([reshape_label(str(t)[:50]) for t in top10["النص"]], top10["إجمالي التفاعل"])
-            ax.set_xlabel(reshape_label("إجمالي التفاعل")); ax.set_ylabel(reshape_label("النص"))
-            beautify_axes(ax)
-            st.pyplot(fig)
+    # ✅ الرسوم أصبحت دائمًا ظاهرة بغض النظر عن show_cards
+
+    st.subheader("🔥 أكثر التغريدات تفاعلًا")
+    st.caption("أفضل 10 تغريدات حسب إجمالي التفاعل.")
+    top10 = filtered.sort_values(by="إجمالي التفاعل", ascending=False).head(10)
+    if len(top10) > 0:
+        fig, ax = plt.subplots()
+        ax.barh([reshape_label(str(t)[:50]) for t in top10["النص"]], top10["إجمالي التفاعل"])
+        ax.set_xlabel(reshape_label("إجمالي التفاعل")); ax.set_ylabel(reshape_label("النص"))
+        beautify_axes(ax)
+        st.pyplot(fig)
+    else:
+        st.info("لا توجد تغريدات كافية للرسم.")
+
+    st.subheader("⏰ أفضل ساعات النشر (متوسط التفاعل)")
+    st.caption("متوسط إجمالي التفاعل لكل ساعة نشر.")
+    if filtered["DT"].notna().any():
+        filtered["ساعة"] = filtered["DT"].dt.hour
+        hourly = filtered.groupby("ساعة")["إجمالي التفاعل"].mean()
+        fig2, ax2 = plt.subplots()
+        hourly.plot(kind="bar", ax=ax2)
+        ax2.set_xlabel(reshape_label("ساعة النشر")); ax2.set_ylabel(reshape_label("متوسط التفاعل"))
+        beautify_axes(ax2)
+        st.pyplot(fig2)
+    else:
+        st.info("لا توجد تواريخ صالحة.")
+
+    st.subheader("📈 أعلى نسب التفاعل")
+    st.caption("أفضل 10 تغريدات حسب نسبة التفاعل (التفاعل ÷ المشاهدات).")
+    top_rate = filtered.sort_values(by="نسبة التفاعل (%)", ascending=False).head(10)
+    if len(top_rate) > 0:
+        fig3, ax3 = plt.subplots()
+        ax3.barh([reshape_label(str(t)[:50]) for t in top_rate["النص"]], top_rate["نسبة التفاعل (%)"])
+        ax3.set_xlabel(reshape_label("نسبة التفاعل (%)"))
+        beautify_axes(ax3)
+        st.pyplot(fig3)
+    else:
+        st.info("لا توجد بيانات كافية.")
+
+    # --- Heatmap ---
+    st.subheader("📅 أفضل الأوقات للنشر (Heatmap)")
+    st.caption("متوسط التفاعل حسب اليوم والساعة.")
+    tmp = filtered.copy()
+    if not tmp.empty:
+        if "تاريخ النشر_DT" not in tmp.columns:
+            tmp["تاريخ النشر_DT"] = pd.to_datetime(tmp["تاريخ النشر"], errors="coerce")
+        tmp["اليوم_انجليزي"] = tmp["تاريخ النشر_DT"].dt.day_name()
+        tmp["اليوم"] = tmp["اليوم_انجليزي"].map({
+            "Sunday": "الأحد", "Monday": "الاثنين", "Tuesday": "الثلاثاء",
+            "Wednesday": "الأربعاء", "Thursday": "الخميس", "Friday": "الجمعة", "Saturday": "السبت"
+        })
+        tmp["الساعة"] = tmp["تاريخ النشر_DT"].dt.hour
+        pivot_table = tmp.pivot_table(index="اليوم", columns="الساعة", values="إجمالي التفاعل", aggfunc="mean", fill_value=0)
+        if pivot_table.empty:
+            st.info("لا توجد بيانات كافية لإنشاء Heatmap.")
         else:
-            st.info("لا توجد تغريدات كافية للرسم.")
+            days_order = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"]
+            pivot_table = pivot_table.reindex(days_order)
+            fig_hm, ax_hm = plt.subplots(figsize=(10, 5))
+            cax = ax_hm.imshow(pivot_table, cmap="YlOrRd", aspect="auto")
+            ax_hm.set_yticks(range(len(pivot_table.index)))
+            ax_hm.set_yticklabels([reshape_label(day) for day in pivot_table.index])
+            ax_hm.set_xticks(range(len(pivot_table.columns)))
+            ax_hm.set_xticklabels([reshape_label(str(col)) for col in pivot_table.columns], rotation=90)
+            ax_hm.set_xlabel(reshape_label("الساعة")); ax_hm.set_ylabel(reshape_label("اليوم"))
+            ax_hm.set_title(reshape_label("معدل التفاعل حسب اليوم والساعة"))
+            fig_hm.colorbar(cax, ax=ax_hm, label=reshape_label("متوسط التفاعل"))
+            beautify_axes(ax_hm)
+            st.pyplot(fig_hm)
+    else:
+        st.info("لا توجد بيانات كافية.")
 
-        st.subheader("⏰ أفضل ساعات النشر (متوسط التفاعل)")
-        st.caption("متوسط إجمالي التفاعل لكل ساعة نشر.")
-        if filtered["DT"].notna().any():
-            filtered["ساعة"] = filtered["DT"].dt.hour
-            hourly = filtered.groupby("ساعة")["إجمالي التفاعل"].mean()
-            fig2, ax2 = plt.subplots()
-            hourly.plot(kind="bar", ax=ax2)
-            ax2.set_xlabel(reshape_label("ساعة النشر")); ax2.set_ylabel(reshape_label("متوسط التفاعل"))
-            beautify_axes(ax2)
-            st.pyplot(fig2)
-        else:
-            st.info("لا توجد تواريخ صالحة.")
+    # --- توقع الأداء ---
+    st.subheader("🔮 توقع الأداء المستقبلي")
+    st.caption("علاقة خطية بين المشاهدات والتفاعل لتقدير التفاعل المتوقع.")
+    if len(filtered) >= 4 and filtered["عدد المشاهدات"].sum() > 0:
+        X = np.array(filtered["عدد المشاهدات"]).reshape(-1, 1)
+        y = np.array(filtered["إجمالي التفاعل"])
+        try:
+            model = LinearRegression().fit(X, y)
+            st.info(f"معامل الانحدار: {model.coef_[0]:.4f} | الثابت: {model.intercept_:.2f}")
+            future_impr = st.number_input("عدد المشاهدات المتوقعة:", min_value=0, value=500, step=50)
+            pred = model.predict([[future_impr]])[0]
+            st.success(f"التفاعل المتوقع: {pred:.0f}")
 
-        st.subheader("📈 أعلى نسب التفاعل")
-        st.caption("أفضل 10 تغريدات حسب نسبة التفاعل (التفاعل ÷ المشاهدات).")
-        top_rate = filtered.sort_values(by="نسبة التفاعل (%)", ascending=False).head(10)
-        if len(top_rate) > 0:
-            fig3, ax3 = plt.subplots()
-            ax3.barh([reshape_label(str(t)[:50]) for t in top_rate["النص"]], top_rate["نسبة التفاعل (%)"])
-            ax3.set_xlabel(reshape_label("نسبة التفاعل (%)"))
-            beautify_axes(ax3)
-            st.pyplot(fig3)
-        else:
-            st.info("لا توجد بيانات كافية.")
+            fig_lr, ax_lr = plt.subplots()
+            ax_lr.scatter(X, y, label=reshape_label("التغريدات"))
+            x_line = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
+            ax_lr.plot(x_line, model.predict(x_line), label=reshape_label("خط الانحدار"))
+            ax_lr.set_xlabel(reshape_label("عدد المشاهدات")); ax_lr.set_ylabel(reshape_label("إجمالي التفاعل"))
+            ax_lr.legend()
+            beautify_axes(ax_lr)
+            st.pyplot(fig_lr)
+        except Exception as e:
+            st.warning(f"تعذّر تدريب نموذج الانحدار: {e}")
+    else:
+        st.info("تحتاج على الأقل 4 تغريدات ذات مشاهدات > 0 لتدريب النموذج.")
 
-        # --- Heatmap (اليوم × الساعة) ---
-        st.subheader("📅 أفضل الأوقات للنشر (Heatmap)")
-        st.caption("متوسط التفاعل حسب اليوم والساعة.")
-        tmp = filtered.copy()
-        if not tmp.empty:
-            if "تاريخ النشر_DT" not in tmp.columns:
-                tmp["تاريخ النشر_DT"] = pd.to_datetime(tmp["تاريخ النشر"], errors="coerce")
-            tmp["اليوم_انجليزي"] = tmp["تاريخ النشر_DT"].dt.day_name()
-            tmp["اليوم"] = tmp["اليوم_انجليزي"].map({
-                "Sunday": "الأحد", "Monday": "الاثنين", "Tuesday": "الثلاثاء",
-                "Wednesday": "الأربعاء", "Thursday": "الخميس", "Friday": "الجمعة", "Saturday": "السبت"
-            })
-            tmp["الساعة"] = tmp["تاريخ النشر_DT"].dt.hour
-            pivot_table = tmp.pivot_table(index="اليوم", columns="الساعة", values="إجمالي التفاعل", aggfunc="mean", fill_value=0)
-            if pivot_table.empty:
-                st.info("لا توجد بيانات كافية لإنشاء Heatmap.")
-            else:
-                days_order = ["الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس","الجمعة","السبت"]
-                pivot_table = pivot_table.reindex(days_order)
-                fig_hm, ax_hm = plt.subplots(figsize=(10, 5))
-                cax = ax_hm.imshow(pivot_table, cmap="YlOrRd", aspect="auto")
-                ax_hm.set_yticks(range(len(pivot_table.index)))
-                ax_hm.set_yticklabels([reshape_label(day) for day in pivot_table.index])
-                ax_hm.set_xticks(range(len(pivot_table.columns)))
-                ax_hm.set_xticklabels([reshape_label(str(col)) for col in pivot_table.columns], rotation=90)
-                ax_hm.set_xlabel(reshape_label("الساعة")); ax_hm.set_ylabel(reshape_label("اليوم"))
-                ax_hm.set_title(reshape_label("معدل التفاعل حسب اليوم والساعة"))
-                fig_hm.colorbar(cax, ax=ax_hm, label=reshape_label("متوسط التفاعل"))
-                beautify_axes(ax_hm)
-                st.pyplot(fig_hm)
-        else:
-            st.info("لا توجد بيانات كافية.")
+    # --- سحابة الكلمات ---
+    st.subheader("☁️ أكثر الكلمات استخدامًا")
+    st.caption("يتم تنظيف الروابط والمنشن والكلمات الوقفية قبل حساب التكرار.")
+    word_counts = {}
+    if not filtered.empty:
+        for _, row in filtered.iterrows():
+            text = re.sub(r"http\S+|www\S+|@\S+", "", str(row["النص"]))
+            words = text.split()
+            for w in words:
+                w = w.strip().lower()
+                if w.startswith("ال"):
+                    w = w[2:]
+                if w in {"في","على","من","عن","الى","إلى","و","او","أو","ما","لا","هذا","هذه","ذلك","هذي","هذيك"}:
+                    continue
+                if w:
+                    word_counts[reshape_label(w)] = word_counts.get(reshape_label(w), 0) + 1
 
-        # --- توقع الأداء (Linear Regression) ---
-        st.subheader("🔮 توقع الأداء المستقبلي")
-        st.caption("علاقة خطية بين المشاهدات والتفاعل لتقدير التفاعل المتوقع.")
-        if len(filtered) >= 4 and filtered["عدد المشاهدات"].sum() > 0:
-            X = np.array(filtered["عدد المشاهدات"]).reshape(-1, 1)
-            y = np.array(filtered["إجمالي التفاعل"])
-            try:
-                model = LinearRegression().fit(X, y)
-                st.info(f"معامل الانحدار: {model.coef_[0]:.4f} | الثابت: {model.intercept_:.2f}")
-                future_impr = st.number_input("عدد المشاهدات المتوقعة:", min_value=0, value=500, step=50)
-                pred = model.predict([[future_impr]])[0]
-                st.success(f"التفاعل المتوقع: {pred:.0f}")
+    if word_counts:
+        try:
+            wordcloud = WordCloud(font_path="arial.ttf", width=1200, height=600,
+                                background_color="white", max_words=100, min_font_size=14,
+                                colormap="plasma").generate_from_frequencies(word_counts)
+            fig_wc, ax_wc = plt.subplots(figsize=(12, 6))
+            ax_wc.imshow(wordcloud, interpolation="bilinear"); ax_wc.axis("off")
+            st.pyplot(fig_wc)
+        except Exception:
+            st.info("تعذّر توليد سحابة الكلمات (تأكد من وجود خط عربي مثل arial.ttf).")
 
-                fig_lr, ax_lr = plt.subplots()
-                ax_lr.scatter(X, y, label=reshape_label("التغريدات"))
-                x_line = np.linspace(X.min(), X.max(), 100).reshape(-1, 1)
-                ax_lr.plot(x_line, model.predict(x_line), label=reshape_label("خط الانحدار"))
-                ax_lr.set_xlabel(reshape_label("عدد المشاهدات")); ax_lr.set_ylabel(reshape_label("إجمالي التفاعل"))
-                ax_lr.legend()
-                beautify_axes(ax_lr)
-                st.pyplot(fig_lr)
-            except Exception as e:
-                st.warning(f"تعذّر تدريب نموذج الانحدار: {e}")
-        else:
-            st.info("تحتاج على الأقل 4 تغريدات ذات مشاهدات > 0 لتدريب النموذج.")
+        st.markdown("### 🏆 الكلمات الأكثر تكراراً")
+        top_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)[:20]
+        top_df = pd.DataFrame(top_words, columns=["الكلمة", "عدد التكرارات"])
+        top_df["الكلمة"] = top_df["الكلمة"].apply(reshape_label)
+        st.markdown(top_df.to_html(index=False, justify="right"), unsafe_allow_html=True)
+    else:
+        st.info("لا توجد كلمات كافية بعد التنظيف.")
 
-        # --- سحابة الكلمات + جدول ---
-        st.subheader("☁️ أكثر الكلمات استخدامًا")
-        st.caption("يتم تنظيف الروابط والمنشن والكلمات الوقفية قبل حساب التكرار.")
-        word_counts = {}
-        if not filtered.empty:
-            for _, row in filtered.iterrows():
-                text = re.sub(r"http\S+|www\S+|@\S+", "", str(row["النص"]))
-                words = text.split()
-                for w in words:
-                    w = w.strip().lower()
-                    if w.startswith("ال"):
-                        w = w[2:]
-                    if w in {"في","على","من","عن","الى","إلى","و","او","أو","ما","لا","هذا","هذه","ذلك","هذي","هذيك"}:
-                        continue
-                    if w:
-                        word_counts[reshape_label(w)] = word_counts.get(reshape_label(w), 0) + 1
-
-        if word_counts:
-            try:
-                wordcloud = WordCloud(font_path="arial.ttf", width=1200, height=600,
-                                    background_color="white", max_words=100, min_font_size=14,
-                                    colormap="plasma").generate_from_frequencies(word_counts)
-                fig_wc, ax_wc = plt.subplots(figsize=(12, 6))
-                ax_wc.imshow(wordcloud, interpolation="bilinear"); ax_wc.axis("off")
-                st.pyplot(fig_wc)
-            except Exception:
-                st.info("تعذّر توليد سحابة الكلمات (تأكد من وجود خط عربي مثل arial.ttf).")
-
-            st.markdown("### 🏆 الكلمات الأكثر تكراراً")
-            top_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)[:20]
-            top_df = pd.DataFrame(top_words, columns=["الكلمة", "عدد التكرارات"])
-            top_df["الكلمة"] = top_df["الكلمة"].apply(reshape_label)
-            st.markdown(top_df.to_html(index=False, justify="right"), unsafe_allow_html=True)
-        else:
-            st.info("لا توجد كلمات كافية بعد التنظيف.")
    
 
 # =========================================================
@@ -871,6 +1021,5 @@ with tab2:
                 st.download_button("💾 تحميل الرسم كـ HTML", data=f, file_name="mentions_network.html", mime="text/html")
     except Exception:
         st.warning("⚠️ لتفعيل شبكة المنشن، ثبّت:  `pip install pyvis`")
-
 
 
