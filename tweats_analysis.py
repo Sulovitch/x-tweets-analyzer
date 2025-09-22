@@ -873,3 +873,4 @@ with tab2:
         st.warning("⚠️ لتفعيل شبكة المنشن، ثبّت:  `pip install pyvis`")
 
 
+
