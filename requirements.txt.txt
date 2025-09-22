@@ -1,0 +1,10 @@
+streamlit
+requests
+numpy
+pandas
+matplotlib
+scikit-learn
+wordcloud
+arabic-reshaper
+python-bidi
+pyvis
