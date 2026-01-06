@@ -1,222 +1,534 @@
 # =========================================
-#               X Tweets Analyzer
-#        (One-shot fetch up to 100 only)
+#        X Tweets Analyzer (One Page)
+#   OAuth2 PKCE + Full Analytics Dashboard
 # =========================================
 
+# =========================================
+#        X Tweets Analyzer (One Page)
+#   OAuth2 PKCE + Full Analytics Dashboard
+# =========================================
 
-# ====== الاستيرادات ======
-import os, json, re, requests, numpy as np, pandas as pd, matplotlib.pyplot as plt, streamlit as st
-from datetime import datetime
+import os, json, requests, secrets, urllib.parse, base64, hashlib
+import numpy as np, pandas as pd, matplotlib.pyplot as plt, streamlit as st
+from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
 from wordcloud import WordCloud
 import arabic_reshaper
 from bidi.algorithm import get_display
+from collections import Counter
+import sqlite3
+import re
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
+import json
+import time
+
+
+
+
+plt.rcParams['font.family'] = ['Arial', 'Segoe UI Emoji']
+
+
+
+
+def init_db():
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+
+    # جدول التغريدات
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tweets (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            username TEXT,
+            text TEXT,
+            created_at TEXT,
+            like_count INTEGER,
+            retweet_count INTEGER,
+            reply_count INTEGER,
+            impression_count INTEGER,
+            media_urls TEXT
+        )
+    """)
+
+    # تأكد من media_urls لو جدول قديم
+    c.execute("PRAGMA table_info(tweets)")
+    cols = [col[1] for col in c.fetchall()]
+    if "media_urls" not in cols:
+        try:
+            c.execute("ALTER TABLE tweets ADD COLUMN media_urls TEXT")
+        except Exception:
+            pass
+
+    # جدول التوكنات (لازم يكون برا الـ if)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            user_id TEXT PRIMARY KEY,
+            username TEXT,
+            access_token TEXT,
+            refresh_token TEXT,
+            expires_at TEXT,
+            last_fetch TEXT
+        )
+    """)
+
+    # تأكد من last_fetch لو جدول قديم
+    c.execute("PRAGMA table_info(user_tokens)")
+    cols = [col[1] for col in c.fetchall()]
+    if "last_fetch" not in cols:
+        try:
+            c.execute("ALTER TABLE user_tokens ADD COLUMN last_fetch TEXT")
+        except Exception:
+            pass
+
+    # جدول oauth_state (اختياري بس مفيد)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_state (
+            state TEXT PRIMARY KEY,
+            verifier TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+init_db()
+
+
+
+
+def save_tokens_to_db(user_id, username, tokens):
+    """احفظ access/refresh + وقت الانتهاء في SQLite"""
+    expires_at = None
+    try:
+        # بعض الاستجابات ترجع expires_in بالثواني
+        if "expires_in" in tokens:
+            expires_at = (datetime.now() + timedelta(seconds=int(tokens["expires_in"]))).isoformat()
+    except Exception:
+        pass
+
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("""
+    INSERT OR REPLACE INTO user_tokens (user_id, username, access_token, refresh_token, expires_at)
+    VALUES (?, ?, ?, ?, ?)
+    """, (
+        user_id,
+        username,
+        tokens.get("access_token"),
+        tokens.get("refresh_token"),
+        expires_at
+    ))
+    conn.commit()
+    conn.close()
+
+def save_state_to_db(state, verifier):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS oauth_state (
+        state TEXT PRIMARY KEY,
+        verifier TEXT
+    )
+    """)
+    c.execute("INSERT OR REPLACE INTO oauth_state (state, verifier) VALUES (?, ?)", (state, verifier))
+    conn.commit()
+    conn.close()
+
+def load_state_from_db(state):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("SELECT verifier FROM oauth_state WHERE state=?", (state,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
+def load_tokens_from_db_by_user(user_id):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("SELECT access_token, refresh_token, expires_at, username FROM user_tokens WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "access_token": row[0],
+        "refresh_token": row[1],
+        "expires_at": row[2],
+        "username": row[3]
+    }
+
+
+def load_any_tokens():
+    """للتطبيق الشخصي (مستخدم واحد): رجّع أول صف محفوظ لاستخدامه بعد Refresh الصفحة."""
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id, username, access_token, refresh_token, expires_at FROM user_tokens LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "user_id": row[0],
+        "username": row[1],
+        "access_token": row[2],
+        "refresh_token": row[3],
+        "expires_at": row[4]
+    }
+
+
+def refresh_access_token(refresh_token):
+    token_url = "https://api.twitter.com/2/oauth2/token"
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLIENT_ID,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    r = requests.post(token_url, data=data, headers=headers, timeout=30)
+    return r
+
+
+def ensure_valid_token():
+    """
+    - إذا ما فيه access_token بالجلسة → خله فاضي وخلي المستخدم يسجل دخول.
+    - إذا فيه expires_at + refresh_token → يحدثه عادي زي أول.
+    """
+    # لا تحمل أي حساب محفوظ تلقائياً
+    if "access_token" not in st.session_state:
+        return  
+
+    # تحقق من انتهاء الصلاحية (تقريبي) ثم حدّث
+    exp = st.session_state.get("expires_at")
+    ref = st.session_state.get("refresh_token")
+    if exp and ref:
+        try:
+            if datetime.fromisoformat(exp) <= datetime.now():
+                rr = refresh_access_token(ref)
+                if rr.status_code == 200:
+                    new_tokens = rr.json()
+                    st.session_state["access_token"] = new_tokens["access_token"]
+
+                    # حدث expires_at
+                    if "expires_in" in new_tokens:
+                        st.session_state["expires_at"] = (
+                            datetime.now() + timedelta(seconds=int(new_tokens["expires_in"]))
+                        ).isoformat()
+
+                    # خزّن بالداتابيس (إذا فيه user_id/username)
+                    if st.session_state.get("user_id") and st.session_state.get("username"):
+                        save_tokens_to_db(
+                            st.session_state["user_id"],
+                            st.session_state["username"],
+                            {
+                                "access_token": new_tokens["access_token"],
+                                "refresh_token": new_tokens.get("refresh_token", ref),
+                                "expires_in": new_tokens.get("expires_in"),
+                            },
+                        )
+                else:
+                    st.warning("انتهت صلاحية التوكن وتعذّر تحديثه. الرجاء تسجيل الدخول من جديد.")
+                    for k in ["access_token", "refresh_token", "expires_at", "user_id", "username"]:
+                        st.session_state.pop(k, None)
+        except Exception:
+            pass
+
+
+def get_last_fetch(user_id):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    c.execute("SELECT last_fetch FROM user_tokens WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def format_last_fetch(last_fetch_date):
+    if last_fetch_date and last_fetch_date not in ["— (وضع تجريبي)"]:
+        try:
+            dt = datetime.fromisoformat(last_fetch_date)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return last_fetch_date
+    return last_fetch_date or "—"
+
+
 
 # ====== ضبط نمط الرسوم ======
 plt.style.use("dark_background")
 
 # ====== أدوات تنسيق عربية ======
 def reshape_label(text):
-    """إصلاح عرض النص العربي مع RTL في الرسوم."""
     try:
         return get_display(arabic_reshaper.reshape(str(text)))
     except Exception:
         return str(text)
 
 def beautify_axes(ax):
-    """تحسين شكل الرسوم (خلفية داكنة + ألوان محاور)."""
     ax.set_facecolor("#0E1117")
     ax.tick_params(colors="white")
     ax.xaxis.label.set_color("white")
     ax.yaxis.label.set_color("white")
     ax.title.set_color("#FFD700")
 
-# ====== إعدادات الصفحة ======
-st.set_page_config(page_title="تحليل تغريدات X", layout="wide")
+# ====== إعدادات تويتر OAuth ======
+CLIENT_ID = st.secrets["CLIENT_ID"]
+REDIRECT_URI = st.secrets["REDIRECT_URI"]
+SCOPE = "tweet.read users.read offline.access"
+AUTH_URL = "https://twitter.com/i/oauth2/authorize"
 
-# ====== إعدادات المستخدم (Sidebar) ======
+# ====== مخزن لحفظ state/verifier ======
+@st.cache_resource
+def get_state_store():
+    return {}
 
+state_store = get_state_store()
 
-st.sidebar.header("🔑 إعدادات الحساب")
+# ====== توليد PKCE ======
+def gen_pkce_pair():
+    code_verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    return code_verifier, code_challenge
 
-USE_DEMO = st.sidebar.checkbox("🔄 تشغيل وضع التجربة ", value=False)
-
-USERNAME = st.sidebar.text_input("👤 اسم المستخدم (بدون @)")
-BEARER_TOKEN = st.sidebar.text_input("🔑 Twitter Bearer Token", type="password")
-
-
-
-
-with st.sidebar.expander("📘 كيف تحصل على التوكن؟"):
-    st.markdown("""
-    1) ادخل على [Twitter Developer Portal](https://developer.twitter.com/en/portal/dashboard)  
-    2) أنشئ App جديد  
-    3) من **Keys & Tokens** انسخ **Bearer Token**  
-    4) ألصقه هنا
-    """)
-
-if not USE_DEMO:
-    if not USERNAME or not BEARER_TOKEN:
-        st.warning("👆 أدخل اسم الحساب والتوكن للمتابعة، أو فعّل وضع التجربة.")
-        st.stop()
-
-
-
-# ====== ملفات التخزين المحلية ======
-CACHE_FILE = "tweets_cache.json"      # الكاش للتغريدات + تاريخ التحديث
-LAST_FETCH_FILE = "last_fetch.json"   # آخر وقت جلب (لمنع إعادة الجلب قبل 30 يوم)
-
-# ====== بيانات تجريبية (Demo Mode) ======
-# ====== بيانات تجريبية (Demo Mode) ======
-DUMMY_TWEETS = [
-    {
-        "id": "1",
-        "text": "أول تغريدة تجريبية 😊 تجربة التحليل",
-        "created_at": "2025-09-01T12:00:00Z",
-        "public_metrics": {
-            "like_count": 10,
-            "retweet_count": 2,
-            "reply_count": 1,
-            "impression_count": 100
-        },
-        "media_urls": []
-    },
-    {
-        "id": "2",
-        "text": "تغريدة ثانية مع صورة #تجربة",
-        "created_at": "2025-09-02T18:30:00Z",
-        "public_metrics": {
-            "like_count": 25,
-            "retweet_count": 5,
-            "reply_count": 3,
-            "impression_count": 200
-        },
-        "media_urls": ["https://placekitten.com/400/300"]
-    },
-    {
-        "id": "3",
-        "text": "نصيحة: البرمجة مثل الرياضة، لازم تدريب يومي! 💻 #برمجة #تعلم",
-        "created_at": "2025-09-03T09:15:00Z",
-        "public_metrics": {
-            "like_count": 50,
-            "retweet_count": 10,
-            "reply_count": 5,
-            "impression_count": 500
-        },
-        "media_urls": []
-    },
-    {
-        "id": "4",
-        "text": "@example شكراً على الدعم 🙏 تجربة منشن",
-        "created_at": "2025-09-04T14:45:00Z",
-        "public_metrics": {
-            "like_count": 5,
-            "retweet_count": 0,
-            "reply_count": 2,
-            "impression_count": 80
-        },
-        "media_urls": []
-    },
-    {
-        "id": "5",
-        "text": "🔥 أهم نصائح لزيادة التفاعل على X: الصور + الوقت المناسب!",
-        "created_at": "2025-09-05T21:00:00Z",
-        "public_metrics": {
-            "like_count": 100,
-            "retweet_count": 20,
-            "reply_count": 15,
-            "impression_count": 1500
-        },
-        "media_urls": ["https://placebear.com/500/300"]
-    },
-    {
-        "id": "6",
-        "text": "اليوم كان جميل 🌅 #إيجابية #سعادة",
-        "created_at": "2025-09-06T06:30:00Z",
-        "public_metrics": {
-            "like_count": 80,
-            "retweet_count": 8,
-            "reply_count": 1,
-            "impression_count": 600
-        },
-        "media_urls": []
-    },
-    {
-        "id": "7",
-        "text": "للأسف اليوم كان مزعج جدًا 😞 #حزن",
-        "created_at": "2025-09-06T23:59:00Z",
-        "public_metrics": {
-            "like_count": 3,
-            "retweet_count": 0,
-            "reply_count": 1,
-            "impression_count": 120
-        },
-        "media_urls": []
-    },
-    {
-        "id": "8",
-        "text": "تغريدة تجريبية طويلة شوية حتى نشوف كيف تنعرض في البطاقة... هذا اختبار بسيط 👍",
-        "created_at": "2025-09-07T11:10:00Z",
-        "public_metrics": {
-            "like_count": 15,
-            "retweet_count": 4,
-            "reply_count": 2,
-            "impression_count": 300
-        },
-        "media_urls": []
-    },
-    {
-        "id": "9",
-        "text": "جربت اليوم مكتبة جديدة بلغة بايثون وكانت رهيبة! #Python #Coding",
-        "created_at": "2025-09-08T17:20:00Z",
-        "public_metrics": {
-            "like_count": 45,
-            "retweet_count": 7,
-            "reply_count": 4,
-            "impression_count": 450
-        },
-        "media_urls": []
-    },
-    {
-        "id": "10",
-        "text": "معلومة سريعة: يمكن تدريب نموذج بسيط للتنبؤ بالتفاعل باستخدام Linear Regression 🧠",
-        "created_at": "2025-09-09T13:00:00Z",
-        "public_metrics": {
-            "like_count": 60,
-            "retweet_count": 12,
-            "reply_count": 6,
-            "impression_count": 900
-        },
-        "media_urls": []
+# ====== ستايل زر الدخول ======
+st.markdown(
+    """
+    <style>
+    div.stButton > button {
+        background-color: #1DA1F2;
+        color: white;
+        font-size: 22px;
+        font-weight: bold;
+        padding: 15px 40px;
+        border-radius: 10px;
+        border: none;
+        cursor: pointer;
+        transition: 0.3s;
     }
-]
+    div.stButton > button:hover { 
+        background-color: #0d8ddb; 
+    }
+    .center-button {
+        display: flex;
+        justify-content: center;   /* وسط أفقياً */
+        align-items: center;       /* وسط عمودياً */
+                    
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ====== شاشة تسجيل الدخول + وضع التجربة (مع وسائط وهمية) ======
+if "access_token" not in st.session_state:
+    with st.container():
+        st.markdown('<div class="center-button">', unsafe_allow_html=True)
+
+        # زر تسجيل الدخول العادي
+        if st.button("🔑 سجل الدخول بحساب تويتر"):
+            state = secrets.token_urlsafe(16)
+            code_verifier, code_challenge = gen_pkce_pair()
+            save_state_to_db(state, code_verifier)
+
+            params = {
+                "response_type": "code",
+                "client_id": CLIENT_ID,
+                "redirect_uri": REDIRECT_URI,
+                "scope": SCOPE,
+                "state": state,
+                "code_challenge": code_challenge,
+                "code_challenge_method": "S256",
+                "prompt": "consent",
+            }
+            login_url = f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
+            st.markdown(
+                f"""<meta http-equiv="refresh" content="0; url={login_url}">""",
+                unsafe_allow_html=True,
+            )
+
+       # زر وضع التجربة (demo mode) تحت زر تسجيل الدخول
+    if st.button("👀 وضع التجربة (عرض تجريبي)"):
+        import random
+        
+
+        now = datetime.now()
+
+        # جمل متنوعة للتغريدات الوهمية
+        samples = [
+            "تحديث بسيط عن المشروع: الأمور تتقدم خطوة بخطوة 🛠️",
+            "اولاً: شكرًا للفريق على الجهد اليوم 🙏",
+            "معلومة سريعة: التقنية تغير شكل العمل بسرعة ⚡",
+            "فكرة: ماذا لو ربطنا الخدمة مع API آخر؟ 🤔",
+            "لحظة رياضية: مبروك للفريق على الفوز 🏆",
+            "نصيحة: ابدأ يومك بخطة صغيرة وسريعة التنفيذ ✅",
+            "لقطة من الرحلة اليوم كانت مدهشة ✨",
+            "حدث مهم تقني — قريبًا تغطية كاملة.",
+            "هل أحد جرب الأداة الجديدة؟ شاركونا رأيكم 👇",
+            "اقتباس اليوم: العمل الجماعي يصنع المعجزات."
+        ]
+
+        # توزيع على 7 أيام (كل تغريدة تُعطى يوم مختلف تقريباً)
+        days_back = list(range(7))  # 0 = اليوم, 6 = قبل أسبوع
+
+        fake_tweets = []
+        for i in range(10):
+            # اختر يوم عشوائي من الأسبوع وساعة عشوائية
+            day_offset = random.choice(days_back)
+            created = now - timedelta(days=day_offset, hours=random.randint(0, 23))
+
+            # أضف صورة لبعض التغريدات
+            media = []
+            if i % 3 == 0:
+                media.append(f"https://picsum.photos/seed/demo{i}/800/450")
+
+            fake_tweets.append({
+                "id": f"fake_{i+1}",
+                "text": samples[i % len(samples)],
+                "created_at": created.isoformat(),
+                "public_metrics": {
+                    "like_count": random.randint(5, 500),
+                    "retweet_count": random.randint(0, 120),
+                    "reply_count": random.randint(0, 80),
+                    "impression_count": random.randint(200, 3000),
+                },
+                "media_urls": media
+            })
+
+        # خزّن وضع التجربة في الجلسة
+        st.session_state["tweets_demo"] = fake_tweets
+        st.session_state["username"] = "demo_user"
+        st.session_state["user_id"] = "demo_id"
+        st.session_state["access_token"] = "demo_token"  # لتجاوز شرط التوكن
+        st.success("✅ تم تفعيل وضع التجربة")
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+    # ====== بعد الرجوع من تويتر (OAuth callback) ======
+    q = st.query_params
+    code, state = q.get("code"), q.get("state")
+    if isinstance(code, list): code = code[0]
+    if isinstance(state, list): state = state[0]
+
+    if code and state and "access_token" not in st.session_state:
+        code_verifier = load_state_from_db(state)
+        if not code_verifier:
+            st.error("⚠️ state غير معروف. أعد المحاولة.")
+            st.stop()
+
+        token_url = "https://api.twitter.com/2/oauth2/token"
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": CLIENT_ID,
+            "redirect_uri": REDIRECT_URI,
+            "code": code,
+            "code_verifier": code_verifier,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        r = requests.post(token_url, data=data, headers=headers, timeout=30)
+        tokens = r.json()
+
+        if "access_token" in tokens:
+            st.session_state["access_token"] = tokens["access_token"]
+
+            me = requests.get(
+                "https://api.twitter.com/2/users/me",
+                headers={"Authorization": f"Bearer {tokens['access_token']}"},
+                timeout=30
+            )
+            user_data = me.json().get("data", {})
+            st.session_state["user_id"] = user_data.get("id")
+            st.session_state["username"] = user_data.get("username")
+
+            # خزّن expires_at/refresh_token في الجلسة والداتابيس
+            if "expires_in" in tokens:
+                st.session_state["expires_at"] = (datetime.now() + timedelta(seconds=int(tokens["expires_in"]))).isoformat()
+            if "refresh_token" in tokens:
+                st.session_state["refresh_token"] = tokens["refresh_token"]
+
+            save_tokens_to_db(
+                st.session_state["user_id"],
+                st.session_state["username"],
+                {
+                    "access_token": tokens["access_token"],
+                    "refresh_token": tokens.get("refresh_token"),
+                    "expires_in": tokens.get("expires_in")
+                }
+            )
+
+            # تنظيف الرابط (إزالة query params)
+            st.markdown(
+                """
+                <script>
+                if (window.location.search.length > 0) {
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                }
+                </script>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            st.warning(" حاول تسجيل الدخول مرة أخرى")
+
+
+ensure_valid_token()
+
+# ====== بعد تسجيل الدخول ======
+USERNAME = st.session_state.get("username")
+BEARER_TOKEN = st.session_state.get("access_token")
+
+if not BEARER_TOKEN:
+    st.stop()
+
+#if not USERNAME:
+#    st.error("🚨 لم نستطع جلب بيانات المستخدم. قد يكون السبب تجاوز الحد المسموح (429 Too Many Requests).")
+ #   st.info("⏳ جرّب بعد فترة أو بعد شهر")
+ #   st.stop()
 
 
 
-# ====== تهيئة اتصال API ======
+
+
+
+
+
+
+# ====== دوال API ======
 def auth_header():
-    return {"Authorization": f"Bearer {BEARER_TOKEN}"}
+    return {"Authorization": f"Bearer {st.session_state.get('access_token')}"}
+
 
 def get_user_id(username: str):
-    """جلب معرّف المستخدم من اسمه."""
-    r = requests.get(f"https://api.twitter.com/2/users/by/username/{username}",
-                     headers=auth_header(), timeout=30)
+    url = f"https://api.twitter.com/2/users/by/username/{username}"
+    r = requests.get(url, headers=auth_header(), timeout=30)
+    if r.status_code == 401 and st.session_state.get("refresh_token"):
+        rr = refresh_access_token(st.session_state["refresh_token"])
+        if rr.status_code == 200:
+            new_tokens = rr.json()
+            st.session_state["access_token"] = new_tokens["access_token"]
+            if "expires_in" in new_tokens:
+                st.session_state["expires_at"] = (datetime.now() + timedelta(seconds=int(new_tokens["expires_in"]))).isoformat()
+            # خزّن
+            if st.session_state.get("user_id") and st.session_state.get("username"):
+                save_tokens_to_db(st.session_state["user_id"], st.session_state["username"], {
+                    "access_token": new_tokens["access_token"],
+                    "refresh_token": new_tokens.get("refresh_token", st.session_state.get("refresh_token")),
+                    "expires_in": new_tokens.get("expires_in")
+                })
+            # أعد الطلب
+            r = requests.get(url, headers=auth_header(), timeout=30)
     r.raise_for_status()
     return r.json()["data"]["id"]
 
-def get_latest_tweets(user_id: str, max_results: int = 100):
-    """
-    يجلب حتى 100 تغريدة (الأحدث أولاً) مع ربط الوسائط من includes.media
-    ويدعم pagination بشكل آمن. يرجع قائمة مرتبة من الأحدث إلى الأقدم.
-    """
+
+def get_latest_tweets(user_id: str, max_results: int = 80):
     url = f"https://api.twitter.com/2/users/{user_id}/tweets"
     params = {
-        "tweet.fields": "public_metrics,created_at,attachments,referenced_tweets",
+        "tweet.fields": "public_metrics,created_at,attachments,referenced_tweets,entities",
         "expansions": "attachments.media_keys",
         "media.fields": "url,preview_image_url,type",
         "max_results": min(max_results, 100)
     }
-
     all_tweets = {}
     next_token = None
 
@@ -232,13 +544,14 @@ def get_latest_tweets(user_id: str, max_results: int = 100):
 
         tweets = data.get("data", [])
         if not tweets:
-            break  # ✅ لو ما فيه بيانات جديدة، نوقف
+            break
 
-        includes_media = {m["media_key"]: m
-                          for m in data.get("includes", {}).get("media", [])} if data.get("includes") else {}
+        includes_media = {m["media_key"]: m for m in data.get("includes", {}).get("media", [])} if data.get("includes") else {}
 
         for t in tweets:
             media_urls = []
+
+            # 🟢 الطريقة الرسمية: attachments.media_keys
             atts = t.get("attachments", {})
             if isinstance(atts, dict) and "media_keys" in atts:
                 for mk in atts["media_keys"]:
@@ -249,114 +562,232 @@ def get_latest_tweets(user_id: str, max_results: int = 100):
                         media_urls.append(m["url"])
                     elif m.get("type") in ["video", "animated_gif"] and m.get("preview_image_url"):
                         media_urls.append(m["preview_image_url"])
+
+            # 🟡 fallback: لو ما فيه media_keys → جرّب entities.urls
+            if not media_urls:
+                for u in t.get("entities", {}).get("urls", []):
+                    expanded = u.get("expanded_url")
+                    if expanded and "pbs.twimg.com" in expanded:  # سيرفر صور تويتر
+                        media_urls.append(expanded)
+
             t["media_urls"] = media_urls
             all_tweets[t["id"]] = t
 
         next_token = data.get("meta", {}).get("next_token")
         if not next_token:
-            break  # ✅ توقف إذا ما فيه صفحة تالية
+            break
 
-    # الأحدث أولاً
-    tweets_list = sorted(all_tweets.values(), key=lambda t: t.get("created_at", ""), reverse=True)
-    return tweets_list[:max_results]
+        # 💤 تأخير بسيط قبل الطلب الجاي
+        time.sleep(2)
+
+    return sorted(all_tweets.values(), key=lambda t: t.get("created_at", ""), reverse=True)[:max_results]
 
 
-def save_cached_tweets(tweets):
-    """حفظ الكاش + ختم وقت التحديث."""
-    data = {"tweets": tweets, "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_cached_tweets():
-    """تحميل الكاش إن وُجد."""
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-            return d.get("tweets", []), d.get("last_updated")
-    return [], None
+def save_tweets_to_db(tweets, user_id, username):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+    for t in tweets:
+        pm = t.get("public_metrics", {}) or {}
+        media_json = json.dumps(t.get("media_urls", []), ensure_ascii=False)
+        c.execute("""
+        INSERT OR REPLACE INTO tweets 
+        (id, user_id, username, text, created_at, like_count, retweet_count, reply_count, impression_count, media_urls)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+        t["id"],
+        user_id,
+        username,
+        t.get("text",""),
+        t.get("created_at",""),
+        pm.get("like_count",0),
+        pm.get("retweet_count",0),
+        pm.get("reply_count",0),
+        pm.get("impression_count",0),
+        media_json
+    ))
 
-# ====== جلب التغريدات (مرة كل 30 يوم) ======
-if USE_DEMO:
-    # ✅ في وضع التجربة نستخدم التغريدات الوهمية
-    tweets = DUMMY_TWEETS
-    last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    last_fetch_date = None
-    st.info("🧪 وضع التجربة مفعل — البيانات المستخدمة ليست حقيقية.")
-else:
-    # 🔄 الوضع العادي: نحمل من الكاش ونتعامل مع API
-    tweets, last_updated = load_cached_tweets()
-    last_fetch_date = None
-    if os.path.exists(LAST_FETCH_FILE):
-        with open(LAST_FETCH_FILE, "r", encoding="utf-8") as f:
-            last_fetch_date = json.load(f).get("last_fetch")
+    conn.commit()
+    conn.close()
 
-    disable_fetch = False
-    if last_fetch_date:
-        last_dt = datetime.fromisoformat(last_fetch_date)
-        days_since = (datetime.now() - last_dt).days
-        if days_since < 30:
-            st.info(f"⏳ تم الجلب بتاريخ {last_dt.strftime('%Y-%m-%d')} — يمكنك الجلب مرة أخرى بعد {30 - days_since} يوم")
-            disable_fetch = True
+
+def load_tweets_from_db(username):
+    conn = sqlite3.connect("tweets.db")
+    c = conn.cursor()
+
+    # تحقق من الأعمدة الموجودة
+    c.execute("PRAGMA table_info(tweets)")
+    cols = [col[1] for col in c.fetchall()]
+    has_media_col = "media_urls" in cols
+
+    if has_media_col:
+        c.execute("""
+            SELECT id, text, created_at, like_count, retweet_count, reply_count, impression_count, media_urls
+            FROM tweets WHERE username=? ORDER BY created_at DESC
+        """, (username,))
+    else:
+        c.execute("""
+            SELECT id, text, created_at, like_count, retweet_count, reply_count, impression_count
+            FROM tweets WHERE username=? ORDER BY created_at DESC
+        """, (username,))
+
+    rows = c.fetchall()
+    conn.close()
+
+    tweets = []
+    for r in rows:
+        if has_media_col:
+            media_list = []
+            try:
+                media_list = json.loads(r[7]) if r[7] else []
+            except Exception:
+                media_list = []
+            tweets.append({
+                "id": r[0],
+                "text": r[1],
+                "created_at": r[2],
+                "public_metrics": {
+                    "like_count": r[3],
+                    "retweet_count": r[4],
+                    "reply_count": r[5],
+                    "impression_count": r[6],
+                },
+                "media_urls": media_list
+            })
         else:
-            st.success("✅ انتهت مدة الانتظار، يمكنك الجلب الآن")
+            tweets.append({
+                "id": r[0],
+                "text": r[1],
+                "created_at": r[2],
+                "public_metrics": {
+                    "like_count": r[3],
+                    "retweet_count": r[4],
+                    "reply_count": r[5],
+                    "impression_count": r[6],
+                },
+                "media_urls": []  # ما فيه صور محفوظة في الجدول القديم
+            })
+    return tweets
 
-    if st.button("🚀 جلب التغريدات (حتى 100 مرّة واحدة)", disabled=disable_fetch):
+
+
+
+# ====== جلب التغريدات ======
+if "tweets_demo" in st.session_state:
+    # 👀 وضع التجربة
+    tweets = st.session_state["tweets_demo"]
+    USERNAME = st.session_state.get("username", "demo_user")
+    last_fetch_date = "— (وضع تجريبي)"
+
+    st.sidebar.success("✅ أنت تستخدم وضع التجربة (بيانات وهمية)")
+else:
+    # 👤 الوضع العادي
+    tweets = load_tweets_from_db(USERNAME)
+
+    last_fetch_date = None
+
+    current_user_id = st.session_state.get("user_id")
+    last_fetch_date = get_last_fetch(current_user_id) if current_user_id else None
+
+
+    # تحقق من إمكانية التحديث
+    can_update = False
+    if not last_fetch_date:
+        can_update = True
+    else:
         try:
-            user_id = get_user_id(USERNAME)
-            tweets = get_latest_tweets(user_id, max_results=100)
-            save_cached_tweets(tweets)
-            with open(LAST_FETCH_FILE, "w", encoding="utf-8") as f:
-                json.dump({"last_fetch": datetime.now().isoformat()}, f)
-            st.success(f"✅ تم جلب {len(tweets)} تغريدة بنجاح")
-        except Exception as e:
-            st.error(f"⚠️ خطأ أثناء الجلب: {e}")
-            st.stop()
+            last_dt = datetime.fromisoformat(last_fetch_date)
+            if (datetime.now().date() - last_dt.date()).days >= 1:
+                can_update = True
+        except Exception:
+            # لو التاريخ مخرب، اسمح بالتحديث مرة واحدة ثم بيتصلح
+            can_update = True
 
 
+    if can_update:
+        if st.sidebar.button("🔄 تحديث البيانات الآن"):
+            try:
+                user_id = get_user_id(USERNAME)
+                new_tweets = get_latest_tweets(user_id, max_results=90)
+                save_tweets_to_db(new_tweets, user_id, USERNAME)
+
+                conn = sqlite3.connect("tweets.db")
+                c = conn.cursor()
+                c.execute("""
+                    UPDATE user_tokens
+                    SET last_fetch=?
+                    WHERE user_id=?
+                """, (datetime.now().isoformat(), user_id))
+                conn.commit()
+                conn.close()
+
+                tweets = load_tweets_from_db(USERNAME)
+                st.success(f"✅ تم تحديث البيانات ({len(new_tweets)} تغريدة جديدة) — المجموع الآن {len(tweets)}")
+            except Exception as e:
+                st.error(f"⚠️ خطأ أثناء التحديث: {e}")
+                st.stop()
+    else:
+        st.sidebar.info("⏳ آخر تحديث محفوظ. 🔔 تقدر تحدث بعد مرور 24 ساعة.")
+
+# ====== تحقق لو مافيه بيانات ======
 if not tweets:
-    st.warning("⚠️ لا توجد بيانات بعد. قم بالجلب أولاً.")
+    if "tweets_demo" in st.session_state:
+        st.warning("⚠️ لا توجد بيانات تجريبية (تأكد من زر 👀 وضع التجربة).")
+    else:
+        st.warning("⚠️ لا توجد بيانات بعد. جرّب تحديث البيانات أو سجل الدخول.")
     st.stop()
 
-# ====== تجهيز الـ DataFrame الأساسي ======
+# 🔄 تنسيق التاريخ (مرة وحدة فقط)
+formatted = format_last_fetch(last_fetch_date)
+
+
+# ====== عرض في الـ sidebar ======
+st.sidebar.header("🔑 حسابك")
+st.sidebar.success(f"✅ متصل كـ @{USERNAME}")
+
+tweets_count = len(tweets) if 'tweets' in locals() else 0
+
+st.sidebar.markdown("### 📊 حالة البيانات")
+st.sidebar.info(f"""
+- 📝 عدد التغريدات: **{tweets_count}**
+- 🗓️ آخر تحديث: **{formatted}**
+""")
+
+
+# ====== تجهيز DataFrame ======
 def build_dataframe(raw_tweets):
-    """تحويل التغريدات إلى إطار بيانات مع أعمدة مفيدة للتحليل."""
     rows = []
     for t in raw_tweets:
         pm = t.get("public_metrics", {}) or {}
-        created_dt = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00")) if t.get("created_at") else None
+        created_dt = datetime.fromisoformat(t["created_at"].replace("Z","+00:00")) if t.get("created_at") else None
         created_str = created_dt.strftime("%Y-%m-%d %H:%M") if created_dt else ""
-
-        # تعريف reply: إما تبدأ بمنشن أو فيها referenced_tweets بنوع replied_to
         is_reply = False
-        if str(t.get("text", "")).strip().startswith("@"):
+        if str(t.get("text","")).strip().startswith("@"):
             is_reply = True
-        for ref in t.get("referenced_tweets", []) or []:
-            if ref.get("type") == "replied_to":
+        for ref in t.get("referenced_tweets",[]) or []:
+            if ref.get("type")=="replied_to":
                 is_reply = True
                 break
-
-        media_urls = t.get("media_urls", []) or []
-
+        media_urls = t.get("media_urls",[]) or []
         rows.append({
-            "id": t.get("id", ""),
-            "النص": t.get("text", ""),
+            "id": t.get("id",""),
+            "النص": t.get("text",""),
             "تاريخ النشر": created_str,
             "DT": created_dt,
-            "الإعجابات": pm.get("like_count", 0),
-            "الريتويت": pm.get("retweet_count", 0),
-            "الردود": pm.get("reply_count", 0),
-            "عدد المشاهدات": pm.get("impression_count", 0),
-            "إجمالي التفاعل": pm.get("like_count", 0) + pm.get("retweet_count", 0) + pm.get("reply_count", 0),
-            "نسبة التفاعل (%)": 0.0,  # نحتسبها بعدين
-            "has_media": len(media_urls) > 0,
+            "الإعجابات": pm.get("like_count",0),
+            "الريتويت": pm.get("retweet_count",0),
+            "الردود": pm.get("reply_count",0),
+            "عدد المشاهدات": pm.get("impression_count",0),
+            "إجمالي التفاعل": pm.get("like_count",0)+pm.get("retweet_count",0)+pm.get("reply_count",0),
+            "نسبة التفاعل (%)": 0.0,
+            "has_media": len(media_urls)>0,
             "media_urls": media_urls,
             "is_reply": is_reply
         })
     df_ = pd.DataFrame(rows)
-    # نسبة التفاعل%
     df_["نسبة التفاعل (%)"] = np.where(
-        df_["عدد المشاهدات"] > 0,
-        (df_["إجمالي التفاعل"] / df_["عدد المشاهدات"] * 100).round(2),
+        df_["عدد المشاهدات"]>0,
+        (df_["إجمالي التفاعل"]/df_["عدد المشاهدات"]*100).round(2),
         0.0
     )
     return df_
@@ -371,7 +802,6 @@ tab1, tab2 = st.tabs(["📊 تحليل التفاعل", "🔎 تحليل الح�
 # =========================================================
 with tab1:
     st.title("📊 لوحة تحكم تحليل التغريدات")
-    st.caption(f"@{USERNAME} — عدد التغريدات: **{len(df)}** | آخر تحديث: **{last_updated or '—'}**")
 
     # --- فلاتر العرض ---
     st.subheader("🔍 فلاتر")
@@ -385,22 +815,28 @@ with tab1:
 
     col_f4, col_f5, col_f6 = st.columns(3)
     with col_f4:
-        min_eng = st.slider("الحد الأدنى لإجمالي التفاعل", 0, int(df["إجمالي التفاعل"].max() or 0), 0)
+        max_eng = int(df["إجمالي التفاعل"].max() or 0)
+        if max_eng == 0:
+            max_eng = 1  # عشان ما يصير min=max
+
+        min_eng = st.slider(
+            "الحد الأدنى لإجمالي التفاعل",
+            0,
+            max_eng,
+            0
+        )
+
     with col_f5:
         kind = st.selectbox("نوع التغريدة", ["الكل", "تغريدات أصلية فقط", "منشن فقط"])
     with col_f6:
         only_media = st.checkbox("📷 عرض التغريدات التي تحتوي وسائط فقط", key="filter_media_checkbox")
-    
-
-
-        # ✅ خيار إظهار/إخفاء بطاقات التغريدات فقط (الرسوم دائماً ظاهرة)
-    show_cards = st.checkbox(
-        "🗂️ عرض بطاقات التغريدات",
-        value=True,
-        help="إذا ألغيت التحديد سيتم إخفاء البطاقات فقط — الرسوم ستظل ظاهرة."
+        only_charts = st.checkbox(
+        "📊 عرض الرسوم فقط",
+        value=False,
+        help="إذا فعلت هذا الخيار سيتم إخفاء بطاقات التغريدات"
     )
-
-
+    
+    
 
     # تطبيق الفلاتر
     filtered = df.copy()
@@ -438,7 +874,7 @@ with tab1:
     st.caption("كل بطاقة تعرض أهم أرقام التغريدة مع رابط مباشر وصور إن وجدت.")
 
     # --- عرض بطاقات التغريدات ---
-    if show_cards:
+    if not only_charts:
         for _, row in filtered.iterrows():
             tweet_url = f"https://twitter.com/{USERNAME}/status/{row['id']}"
             st.markdown(
@@ -456,8 +892,11 @@ with tab1:
             if row["has_media"]:
                 for m in row["media_urls"]:
                     st.image(m, use_container_width=True)
+
+
+
     else:
-        st.info("🗂️ تم إخفاء بطاقات التغريدات. فعّل الخيار أعلاه لعرضها.")
+        st.info("🗂️ تم إخفاء بطاقات التغريدات لانك مفعل عرض الرسوم فقط")
 
     # ✅ الرسوم أصبحت دائمًا ظاهرة بغض النظر عن show_cards
 
@@ -858,7 +1297,7 @@ with tab2:
     # =============== تحليل الوسائط ===============
     st.subheader("🎥 تأثير الوسائط")
 
-    media_grp = filtered.groupby("has_media")["إجمالي التفاعل"].mean().rename({False: "بدون وسائط", True: "مع وسائط"})
+    media_grp = filtered.groupby("has_media")["إجمالي التفاعل"].mean().rename({False: reshape_label("بدون وسائط"), True: reshape_label("مع وسائط")})
 
     if not media_grp.empty:
         fig_media, ax_media = plt.subplots()
@@ -973,7 +1412,7 @@ with tab2:
 
     # =============== شبكة المنشن (اختياري) ===============
     st.subheader("🧩 شبكة المنشن")
-    st.caption("تعرض الحسابات التي تم ذكرها بكثرة. (تحتاج مكتبة pyvis؛ سيتم عرض تنبيه إن لم تتوفر).")
+    st.caption("تعرض الحسابات التي تم ذكرها بكثرة")
     try:
         from pyvis.network import Network
         import streamlit.components.v1 as components
@@ -1000,7 +1439,8 @@ with tab2:
 
             max_count = selected_mentions.max() if len(selected_mentions) > 0 else 1
             norm = plt.Normalize(vmin=selected_mentions.min(), vmax=max_count)
-            cmap = cm.get_cmap("coolwarm")
+            import matplotlib
+            cmap = matplotlib.colormaps.get("coolwarm")
 
             for account, count in selected_mentions.items():
                 net.add_node(
